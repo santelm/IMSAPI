@@ -1,0 +1,12 @@
+# Copy the relevant values into your PowerShell session. Do not commit secrets.
+$env:ITAC_LOGIN_URL = "https://itac.example/REPLACE_WITH_REGLOGIN_ENDPOINT"
+$env:ITAC_CHANGE_URL = "https://itac.example/REPLACE_WITH_MLCHANGEMATERIALBINDATA_ENDPOINT"
+$env:ITAC_ATTRIBUTE_URL = "https://itac.example/REPLACE_WITH_ATTRIBAPPENDATTRIBUTEVALUES_ENDPOINT"
+$env:ITAC_LOGOUT_URL = "https://itac.example/REPLACE_WITH_REGLOGOUT_ENDPOINT"
+$env:ITAC_STATION = "STATION-01"
+$env:ITAC_STATION_PASSWORD = ""
+$env:ITAC_USER = "api-user"
+$env:ITAC_PASSWORD = "replace-me"
+$env:ITAC_CLIENT = "YOUR_ITAC_CLIENT_CODE"
+$env:ITAC_REGISTRATION_TYPE = "U"
+$env:ITAC_SYSTEM_IDENTIFIER = "material-bin-updater"

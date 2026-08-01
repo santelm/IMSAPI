@@ -1,0 +1,3 @@
+# One material bin number/name per line. Empty lines and comments are ignored.
+BIN-000001
+BIN-000002
