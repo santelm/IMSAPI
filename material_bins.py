@@ -362,7 +362,7 @@ class ItacClient:
         })
         return self._result_code(response)
 
-    def disassemble_artemis(self, pcb_serial: str, store_attributes: bool = True) -> dict[str, Any]:
+    def prepare_artemis_disassembly(self, pcb_serial: str) -> dict[str, Any]:
         artemis = self.get_serial_attributes(pcb_serial, ["ARTEMIS_SN"])
         if not artemis:
             raise ItacError(f"ARTEMIS_SN attribute not found on {pcb_serial}")
@@ -372,6 +372,13 @@ class ItacClient:
         merge_parts = self.get_merge_parts(final_serial)
         if len(merge_parts) not in (2, 3):
             raise ItacError(f"Artemis merge tree must contain 2 or 3 entries; found {len(merge_parts)}")
+        return {"pcb_serial": pcb_serial, "final_serial": final_serial,
+                "merge_parts": merge_parts}
+
+    def disassemble_artemis(self, pcb_serial: str, store_attributes: bool = True) -> dict[str, Any]:
+        prepared = self.prepare_artemis_disassembly(pcb_serial)
+        final_serial = prepared["final_serial"]
+        merge_parts = prepared["merge_parts"]
         attributes = self.get_serial_attributes(final_serial) if store_attributes else []
         text_info = env("ITAC_DISASSEMBLY_TEXT_INFO", "IMSAPI web Artemis disassembly")
         for part in merge_parts:

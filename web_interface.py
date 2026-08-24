@@ -22,10 +22,10 @@ from material_bins import (
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 UPDATE_LOCK = threading.Lock()
-DEFAULT_WEB_CONFIG = {"tabs": {"bulk_update": True, "disassembly": True}}
+DEFAULT_WEB_CONFIG = {"default_tab": "disassembly", "tabs": {"bulk_update": True, "disassembly": True}}
 
 
-def load_web_config(path: Path) -> dict[str, bool]:
+def load_web_config(path: Path) -> tuple[dict[str, bool], str]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -36,7 +36,12 @@ def load_web_config(path: Path) -> dict[str, bool]:
     result = {name: bool(tabs.get(name, default)) for name, default in DEFAULT_WEB_CONFIG["tabs"].items()}
     if not any(result.values()):
         raise ItacError("At least one GUI tab must be enabled in web_config.json")
-    return result
+    default_tab = str(data.get("default_tab", "disassembly"))
+    if default_tab not in result:
+        raise ItacError(f"Unknown default_tab {default_tab!r} in web configuration")
+    if not result[default_tab]:
+        default_tab = next(name for name, visible in result.items() if visible)
+    return result, default_tab
 
 
 def page(content: str, active_tab: str, tabs: dict[str, bool]) -> bytes:
@@ -68,13 +73,13 @@ def page(content: str, active_tab: str, tabs: dict[str, bool]) -> bytes:
 <section id="disassembly" class="card tab-panel">
   <h2>Artemis disassembly</h2>
   <p class="hint">Scan or enter the main PCB serial number. The final device is resolved through its ARTEMIS_SN attribute.</p>
-  <form method="post" enctype="multipart/form-data" onsubmit="return confirm('Disassemble this Artemis device? This changes live iTAC data.');">
+  <form method="post" enctype="multipart/form-data">
     <input type="hidden" name="form_kind" value="disassembly">
     <div class="grid">
       <div class="wide"><label for="serial_number">Main PCB serial number</label><input id="serial_number" name="serial_number" autocomplete="off" required autofocus></div>
     </div>
     <label class="check"><input name="store_attributes" value="yes" type="checkbox" checked> Store KI attributes</label>
-    <div class="actions"><button class="danger-button" name="action" value="disassemble">Disassemble</button></div>
+    <div class="actions"><button class="danger-button" name="action" value="prepare">Disassemble</button></div>
   </form>{content if active_tab == 'disassembly' else ''}
 </section>""" if tabs["disassembly"] else ""
     document = f"""<!doctype html>
@@ -107,6 +112,9 @@ def page(content: str, active_tab: str, tabs: dict[str, bool]) -> bytes:
       cursor:pointer }} .preview {{ color:var(--brand2); background:var(--soft) }}
     .apply {{ color:#fff; background:var(--brand) }} button:hover {{ filter:brightness(.95) }}
     .danger-button {{ color:#fff; background:#a62929; border-color:#8b2020 }}
+    .dialog {{ margin-top:24px; padding:20px; border:2px solid #d5a1a1; border-radius:12px; background:#fff8f8 }}
+    .dialog h2 {{ margin-top:0 }} .unit-list {{ margin:12px 0; padding-left:20px }}
+    .cancel-button {{ color:var(--ink); background:#fff; border-color:#aeb8c5 }}
     .check {{ display:flex; align-items:center; gap:9px; margin-top:20px }} .check input {{ width:auto }}
     .confirm {{ display:flex; align-items:center; gap:9px; margin-top:20px; color:var(--danger) }}
     .confirm input {{ width:auto }} .result {{ margin-top:22px; border-top:1px solid var(--line); padding-top:20px }}
@@ -181,12 +189,42 @@ def render_results(rows: list[tuple[str, str, int | None]], heading: str, note: 
     return f'<div class="result"><h2>{html.escape(heading)}</h2>{note_html}<table><thead><tr><th>Object number</th><th>Status</th><th>Code</th></tr></thead><tbody>{table_rows}</tbody></table></div>'
 
 
+def render_disassembly_confirmation(prepared: dict[str, Any], store_attributes: bool) -> str:
+    pcb = html.escape(str(prepared["pcb_serial"]))
+    final_serial = html.escape(str(prepared["final_serial"]))
+    units = "".join(
+        f'<li><strong>{html.escape(part.get("SERIAL_SLAVE_NUMBER", ""))}</strong>'
+        f' <span class="hint">({html.escape(part.get("PART_NUMBER", "unknown part"))})</span></li>'
+        for part in prepared["merge_parts"]
+    )
+    checked_note = "Final-device attributes will be copied to the main PCB." if store_attributes else "Attribute copying is disabled."
+    return f"""<div class="dialog">
+      <h2>Confirm Artemis disassembly</h2>
+      <p><strong>Final device</strong><br>{final_serial}</p>
+      <p><strong>Main PCB</strong><br>{pcb}</p>
+      <p><strong>Merged units</strong></p><ul class="unit-list">{units}</ul>
+      <p class="notice">{html.escape(checked_note)}</p>
+      <p class="bad"><strong>This operation changes live iTAC data and cannot be rolled back automatically.</strong></p>
+      <form method="post" enctype="multipart/form-data">
+        <input type="hidden" name="form_kind" value="disassembly">
+        <input type="hidden" name="serial_number" value="{pcb}">
+        <input type="hidden" name="store_attributes" value="{'yes' if store_attributes else 'no'}">
+        <div class="actions">
+          <button class="danger-button" name="action" value="confirm-disassemble">Confirm disassembly</button>
+          <button class="cancel-button" name="action" value="cancel">Cancel</button>
+        </div>
+      </form>
+    </div>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "iTACBinUI/1.0"
 
     def send_page(self, content: str = "", status: int = 200, active_tab: str | None = None) -> None:
         tabs = self.server.tabs  # type: ignore[attr-defined]
-        if active_tab is None or not tabs.get(active_tab):
+        if active_tab is None:
+            active_tab = self.server.default_tab  # type: ignore[attr-defined]
+        if not tabs.get(active_tab):
             active_tab = next(name for name, visible in tabs.items() if visible)
         body = page(content, active_tab, tabs)
         self.send_response(status)
@@ -221,17 +259,32 @@ class Handler(BaseHTTPRequestHandler):
                 if not serial_number:
                     raise ItacError("Main PCB serial number is required")
                 store_attributes = fields.get("store_attributes") == "yes"
+                action = str(fields.get("action", "prepare"))
+                if action == "cancel":
+                    self.send_page(active_tab="disassembly")
+                    return
                 with UPDATE_LOCK:
                     args = SimpleNamespace(timeout=self.server.timeout_seconds, insecure=self.server.insecure)  # type: ignore[attr-defined]
                     client = ItacClient(build_config(args))
                     try:
                         client.login()
-                        result = client.disassemble_artemis(serial_number, store_attributes)
+                        if action == "prepare":
+                            prepared = client.prepare_artemis_disassembly(serial_number)
+                            result = None
+                        elif action == "confirm-disassemble":
+                            result = client.disassemble_artemis(serial_number, store_attributes)
+                            prepared = None
+                        else:
+                            raise ItacError("Unknown disassembly action")
                     finally:
                         try:
                             client.logout()
                         except ItacError:
                             pass
+                if prepared is not None:
+                    self.send_page(render_disassembly_confirmation(prepared, store_attributes), active_tab="disassembly")
+                    return
+                assert result is not None
                 warning_text = "; ".join(result["warnings"])
                 note = (f'Final device {html.escape(result["final_serial"])} disassembled. '
                         f'{result["merge_count"]} merge(s) removed; '
@@ -323,7 +376,7 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.timeout_seconds = args.timeout  # type: ignore[attr-defined]
     server.insecure = args.insecure  # type: ignore[attr-defined]
-    server.tabs = load_web_config(args.web_config)  # type: ignore[attr-defined]
+    server.tabs, server.default_tab = load_web_config(args.web_config)  # type: ignore[attr-defined]
     print(f"Open http://{args.host}:{args.port}/  (Ctrl+C to stop)")
     try:
         server.serve_forever()

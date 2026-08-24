@@ -115,6 +115,7 @@ Tab visibility is controlled by `web_config.json`:
 
 ```json
 {
+  "default_tab": "disassembly",
   "tabs": {
     "bulk_update": true,
     "disassembly": true
@@ -124,19 +125,24 @@ Tab visibility is controlled by `web_config.json`:
 
 Set either value to `false` to hide and disable that feature. A different file
 can be selected with `python .\web_interface.py --web-config PATH`.
+`default_tab` selects the tab shown when the GUI is first opened. If that tab is
+disabled, the first enabled tab is used automatically.
 
 ### Artemis disassembly
 
 The Disassembly tab accepts one main PCB serial number and implements only the
 Artemis process reconstructed from `MESToolsTabDisassembly.java`:
 
-1. Read `ARTEMIS_SN` from the scanned PCB to identify the final device.
-2. Read the final device's level-1 merge structure (2 or 3 entries expected).
-3. If **Store KI attributes** is checked, snapshot all final-device attributes.
-4. Remove every merge and remove `ARTEMIS_SN` from released child serials.
-5. Append the saved attributes to the scanned/main PCB as `STRING`, overwriting
+1. Read `ARTEMIS_SN` from the scanned PCB and read the final device's level-1
+   merge structure (2 or 3 entries expected).
+2. Show a confirmation view listing the final device, main PCB, and every merged
+   unit with its part number. No data has been changed at this point.
+3. After explicit confirmation, re-read and validate the device and merge tree.
+4. If **Store KI attributes** is checked, snapshot all final-device attributes.
+5. Remove every merge and remove `ARTEMIS_SN` from released child serials.
+6. Append the saved attributes to the scanned/main PCB as `STRING`, overwriting
    with history.
-6. Remove all attributes from the final device and book it as scrap.
+7. Remove all attributes from the final device and book it as scrap.
 
 The checkbox is enabled by default. If it is cleared, steps 3 and 5 are skipped.
 All reads complete before the first destructive call, and processing stops at
