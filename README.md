@@ -108,3 +108,47 @@ attributes (`objectType=0`). All use `bookDate=-1` (current server time).
 The server listens only on the local computer by default. Use `--host` only if
 you deliberately want to expose it to another interface; authentication and
 HTTPS should be added before any shared or production deployment.
+
+### Configurable tabs
+
+Tab visibility is controlled by `web_config.json`:
+
+```json
+{
+  "tabs": {
+    "bulk_update": true,
+    "disassembly": true
+  }
+}
+```
+
+Set either value to `false` to hide and disable that feature. A different file
+can be selected with `python .\web_interface.py --web-config PATH`.
+
+### Artemis disassembly
+
+The Disassembly tab accepts one main PCB serial number and implements only the
+Artemis process reconstructed from `MESToolsTabDisassembly.java`:
+
+1. Read `ARTEMIS_SN` from the scanned PCB to identify the final device.
+2. Read the final device's level-1 merge structure (2 or 3 entries expected).
+3. If **Store KI attributes** is checked, snapshot all final-device attributes.
+4. Remove every merge and remove `ARTEMIS_SN` from released child serials.
+5. Append the saved attributes to the scanned/main PCB as `STRING`, overwriting
+   with history.
+6. Remove all attributes from the final device and book it as scrap.
+
+The checkbox is enabled by default. If it is cleared, steps 3 and 5 are skipped.
+All reads complete before the first destructive call, and processing stops at
+the first failed IMSApi step.
+
+Configure the following REST endpoints in addition to the existing login,
+logout, and append-attribute endpoints:
+
+- `ITAC_ATTRIBUTE_GET_URL` (`attribGetAttributeValues`)
+- `ITAC_ATTRIBUTE_REMOVE_URL` (`attribRemoveAttributeValue`)
+- `ITAC_MERGE_GET_URL` (`trGetMergeParts`)
+- `ITAC_MERGE_REMOVE_URL` (`trRemoveMergeParts`)
+- `ITAC_UPLOAD_STATE_URL` (`trUploadState`)
+
+`ITAC_DISASSEMBLY_TEXT_INFO` supplies the mandatory unmerge audit text.

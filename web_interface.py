@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import threading
 from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
+from pathlib import Path
 from typing import Any
 
 from material_bins import (
@@ -20,13 +22,61 @@ from material_bins import (
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 UPDATE_LOCK = threading.Lock()
+DEFAULT_WEB_CONFIG = {"tabs": {"bulk_update": True, "disassembly": True}}
 
 
-def page(content: str) -> bytes:
+def load_web_config(path: Path) -> dict[str, bool]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = DEFAULT_WEB_CONFIG
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ItacError(f"Cannot load web configuration {path}: {exc}") from exc
+    tabs = data.get("tabs", {})
+    result = {name: bool(tabs.get(name, default)) for name, default in DEFAULT_WEB_CONFIG["tabs"].items()}
+    if not any(result.values()):
+        raise ItacError("At least one GUI tab must be enabled in web_config.json")
+    return result
+
+
+def page(content: str, active_tab: str, tabs: dict[str, bool]) -> bytes:
     keys = "".join(
         f'<option value="{html.escape(key)}">{html.escape(key)}</option>'
         for key in sorted(SUPPORTED_KEYS)
     )
+    tab_buttons = "".join([
+        '<button type="button" class="tab-button" data-tab="bulk_update">Bulk update</button>' if tabs["bulk_update"] else "",
+        '<button type="button" class="tab-button" data-tab="disassembly">Disassembly</button>' if tabs["disassembly"] else "",
+    ])
+    bulk_panel = f"""
+<section id="bulk_update" class="card tab-panel">
+  <form method="post" enctype="multipart/form-data">
+    <input type="hidden" name="form_kind" value="bulk_update">
+    <div class="grid">
+      <div class="wide"><label for="bins">Object list</label><input id="bins" name="bins" type="file" accept=".txt,text/plain" required><div class="hint">UTF-8, one serial number, work order, or material bin per line.</div></div>
+      <div><label for="operation">API operation</label><select id="operation" name="operation"><option value="change">Change material-bin data</option><option value="append-attribute">Append attribute</option></select></div>
+      <div id="change-fields"><label for="key">Material-bin field</label><select id="key" name="key">{keys}</select></div>
+      <div id="attribute-code-field" class="hidden"><label for="attribute_code">Attribute code</label><input id="attribute_code" name="attribute_code"></div>
+      <div id="attribute-target-field" class="hidden"><label for="object_type">Attribute target</label><select id="object_type" name="object_type"><option value="serial-number">Serial number</option><option value="material-bin" selected>Material bin</option><option value="workorder">Work order</option></select></div>
+      <div><label for="value">New value</label><input id="value" name="value" required><div id="value-hint" class="hint"></div></div>
+    </div>
+    <label class="confirm"><input name="confirmed" value="yes" type="checkbox"> I understand that Apply changes live iTAC data.</label>
+    <div class="actions"><button class="preview" name="action" value="preview">Preview file</button><button class="apply" name="action" value="apply">Apply updates</button></div>
+  </form>{content if active_tab == 'bulk_update' else ''}
+</section>""" if tabs["bulk_update"] else ""
+    disassembly_panel = f"""
+<section id="disassembly" class="card tab-panel">
+  <h2>Artemis disassembly</h2>
+  <p class="hint">Scan or enter the main PCB serial number. The final device is resolved through its ARTEMIS_SN attribute.</p>
+  <form method="post" enctype="multipart/form-data" onsubmit="return confirm('Disassemble this Artemis device? This changes live iTAC data.');">
+    <input type="hidden" name="form_kind" value="disassembly">
+    <div class="grid">
+      <div class="wide"><label for="serial_number">Main PCB serial number</label><input id="serial_number" name="serial_number" autocomplete="off" required autofocus></div>
+    </div>
+    <label class="check"><input name="store_attributes" value="yes" type="checkbox" checked> Store KI attributes</label>
+    <div class="actions"><button class="danger-button" name="action" value="disassemble">Disassemble</button></div>
+  </form>{content if active_tab == 'disassembly' else ''}
+</section>""" if tabs["disassembly"] else ""
     document = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -42,6 +92,8 @@ def page(content: str) -> bytes:
     main {{ width:min(900px,calc(100% - 32px)); margin:42px auto; }}
     header {{ margin-bottom:20px }} h1 {{ margin:0; font-size:clamp(28px,5vw,43px); letter-spacing:-.04em }}
     header p {{ color:var(--muted); margin:6px 0 0 }}
+    .tabs {{ display:flex; gap:8px; margin-bottom:12px }} .tab-button {{ background:#e7eef6; color:var(--brand2); border-color:#c8d5e3 }}
+    .tab-button.active {{ background:var(--brand); color:white }} .tab-panel {{ display:none }} .tab-panel.active {{ display:block }}
     .card {{ background:#fff; border:1px solid rgba(190,202,218,.8); border-radius:18px;
       box-shadow:0 18px 50px rgba(32,61,90,.11); padding:clamp(20px,4vw,34px); }}
     .grid {{ display:grid; grid-template-columns:1fr 1fr; gap:18px }}
@@ -54,6 +106,8 @@ def page(content: str) -> bytes:
     button {{ padding:11px 18px; border-radius:9px; border:1px solid var(--brand); font:650 15px system-ui;
       cursor:pointer }} .preview {{ color:var(--brand2); background:var(--soft) }}
     .apply {{ color:#fff; background:var(--brand) }} button:hover {{ filter:brightness(.95) }}
+    .danger-button {{ color:#fff; background:#a62929; border-color:#8b2020 }}
+    .check {{ display:flex; align-items:center; gap:9px; margin-top:20px }} .check input {{ width:auto }}
     .confirm {{ display:flex; align-items:center; gap:9px; margin-top:20px; color:var(--danger) }}
     .confirm input {{ width:auto }} .result {{ margin-top:22px; border-top:1px solid var(--line); padding-top:20px }}
     table {{ width:100%; border-collapse:collapse }} th,td {{ padding:9px 10px; text-align:left; border-bottom:1px solid var(--line) }}
@@ -62,25 +116,20 @@ def page(content: str) -> bytes:
     @media(max-width:640px) {{ .grid {{ grid-template-columns:1fr }} .wide {{ grid-column:auto }} }}
   </style>
 </head>
-<body><main><header><h1>iTAC bulk updater</h1><p>Change material-bin data or append attributes to serial numbers, work orders, and material bins.</p></header>
-<section class="card">
-  <form method="post" enctype="multipart/form-data">
-    <div class="grid">
-      <div class="wide"><label for="bins">Object list</label><input id="bins" name="bins" type="file" accept=".txt,text/plain" required><div class="hint">UTF-8, one serial number, work order, or material bin per line. Blank lines and # comments are ignored.</div></div>
-      <div><label for="operation">API operation</label><select id="operation" name="operation"><option value="change">Change material-bin data</option><option value="append-attribute">Append attribute</option></select></div>
-      <div id="change-fields"><label for="key">Material-bin field</label><select id="key" name="key">{keys}</select></div>
-      <div id="attribute-code-field" class="hidden"><label for="attribute_code">Attribute code</label><input id="attribute_code" name="attribute_code"></div>
-      <div id="attribute-target-field" class="hidden"><label for="object_type">Attribute target</label><select id="object_type" name="object_type"><option value="serial-number">Serial number</option><option value="material-bin" selected>Material bin</option><option value="workorder">Work order</option></select></div>
-      <div><label for="value">New value</label><input id="value" name="value" required><div id="value-hint" class="hint"></div></div>
-    </div>
-    <label class="confirm"><input name="confirmed" value="yes" type="checkbox"> I understand that Apply changes live iTAC data.</label>
-    <div class="actions"><button class="preview" name="action" value="preview">Preview file</button><button class="apply" name="action" value="apply">Apply updates</button></div>
-  </form>{content}
-</section></main>
+<body><main><header><h1>iTAC tools</h1><p>Controlled bulk maintenance and Artemis disassembly.</p></header>
+<nav class="tabs">{tab_buttons}</nav>{bulk_panel}{disassembly_panel}</main>
 <script>
+  const initialTab = {json.dumps(active_tab)};
+  const selectTab = name => {{
+    document.querySelectorAll('.tab-panel').forEach(x => x.classList.toggle('active', x.id === name));
+    document.querySelectorAll('.tab-button').forEach(x => x.classList.toggle('active', x.dataset.tab === name));
+  }};
+  document.querySelectorAll('.tab-button').forEach(x => x.addEventListener('click', () => selectTab(x.dataset.tab)));
+  selectTab(document.getElementById(initialTab) ? initialTab : document.querySelector('.tab-panel').id);
   const operation = document.getElementById('operation');
   const target = document.getElementById('object_type');
   const toggle = () => {{
+    if (!operation) return;
     const append = operation.value === 'append-attribute';
     document.getElementById('change-fields').classList.toggle('hidden', append);
     document.getElementById('attribute-code-field').classList.toggle('hidden', !append);
@@ -96,9 +145,9 @@ def page(content: str) -> bytes:
     }};
     document.getElementById('value-hint').textContent = append ? 'Attribute values are sent as STRING.' : (hints[document.getElementById('key').value] || 'Text value');
   }};
-  operation.addEventListener('change', toggle);
-  target.addEventListener('change', toggle);
-  document.getElementById('key').addEventListener('change', toggle);
+  if (operation) operation.addEventListener('change', toggle);
+  if (target) target.addEventListener('change', toggle);
+  if (document.getElementById('key')) document.getElementById('key').addEventListener('change', toggle);
   toggle();
 </script></body></html>"""
     return document.encode("utf-8")
@@ -135,8 +184,11 @@ def render_results(rows: list[tuple[str, str, int | None]], heading: str, note: 
 class Handler(BaseHTTPRequestHandler):
     server_version = "iTACBinUI/1.0"
 
-    def send_page(self, content: str = "", status: int = 200) -> None:
-        body = page(content)
+    def send_page(self, content: str = "", status: int = 200, active_tab: str | None = None) -> None:
+        tabs = self.server.tabs  # type: ignore[attr-defined]
+        if active_tab is None or not tabs.get(active_tab):
+            active_tab = next(name for name, visible in tabs.items() if visible)
+        body = page(content, active_tab, tabs)
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -161,6 +213,37 @@ class Handler(BaseHTTPRequestHandler):
             if length <= 0 or length > MAX_UPLOAD_BYTES:
                 raise ItacError("Upload must be between 1 byte and 2 MB")
             fields = parse_form(self.headers.get("Content-Type", ""), self.rfile.read(length))
+            form_kind = str(fields.get("form_kind", "bulk_update"))
+            if form_kind == "disassembly":
+                if not self.server.tabs.get("disassembly"):  # type: ignore[attr-defined]
+                    raise ItacError("Disassembly tab is disabled")
+                serial_number = str(fields.get("serial_number", "")).strip()
+                if not serial_number:
+                    raise ItacError("Main PCB serial number is required")
+                store_attributes = fields.get("store_attributes") == "yes"
+                with UPDATE_LOCK:
+                    args = SimpleNamespace(timeout=self.server.timeout_seconds, insecure=self.server.insecure)  # type: ignore[attr-defined]
+                    client = ItacClient(build_config(args))
+                    try:
+                        client.login()
+                        result = client.disassemble_artemis(serial_number, store_attributes)
+                    finally:
+                        try:
+                            client.logout()
+                        except ItacError:
+                            pass
+                warning_text = "; ".join(result["warnings"])
+                note = (f'Final device {html.escape(result["final_serial"])} disassembled. '
+                        f'{result["merge_count"]} merge(s) removed; '
+                        f'{result["attributes_copied"]} attribute(s) copied to {html.escape(serial_number)}.')
+                if warning_text:
+                    note += f" Warnings: {html.escape(warning_text)}"
+                self.send_page(f'<div class="result"><h2 class="ok">Disassembly completed</h2><p class="notice">{note}</p></div>', active_tab="disassembly")
+                return
+            if form_kind != "bulk_update":
+                raise ItacError("Unknown form")
+            if not self.server.tabs.get("bulk_update"):  # type: ignore[attr-defined]
+                raise ItacError("Bulk update tab is disabled")
             uploaded = fields.get("bins")
             if not isinstance(uploaded, bytes):
                 raise ItacError("Choose a text file")
@@ -189,7 +272,7 @@ class Handler(BaseHTTPRequestHandler):
             action = fields.get("action", "preview")
             duplicate_note = f" {len(duplicates)} duplicate line(s) skipped." if duplicates else ""
             if action != "apply":
-                self.send_page(render_results([(b, "Ready", None) for b in bins], f"Preview: {len(bins)} bin(s)", f"No changes were made.{duplicate_note}"))
+                self.send_page(render_results([(b, "Ready", None) for b in bins], f"Preview: {len(bins)} bin(s)", f"No changes were made.{duplicate_note}"), active_tab="bulk_update")
                 return
             if fields.get("confirmed") != "yes":
                 raise ItacError("Tick the confirmation box before applying updates")
@@ -219,9 +302,10 @@ class Handler(BaseHTTPRequestHandler):
                     except ItacError:
                         pass
             failed = sum(status in {"Failed", "Request error"} for _, status, _ in rows)
-            self.send_page(render_results(rows, f"Completed: {len(rows) - failed} updated, {failed} failed", duplicate_note.strip()))
+            self.send_page(render_results(rows, f"Completed: {len(rows) - failed} updated, {failed} failed", duplicate_note.strip()), active_tab="bulk_update")
         except (ItacError, OSError, ValueError) as exc:
-            self.send_page(f'<div class="result"><p class="notice bad">{html.escape(str(exc))}</p></div>', 400)
+            active = "disassembly" if 'form_kind' in locals() and form_kind == "disassembly" else "bulk_update"
+            self.send_page(f'<div class="result"><p class="notice bad">{html.escape(str(exc))}</p></div>', 400, active_tab=active)
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"{self.client_address[0]} - {fmt % args}")
@@ -233,10 +317,13 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--timeout", type=float, default=30.0, help="iTAC request timeout")
     parser.add_argument("--insecure", action="store_true", help="Disable iTAC TLS verification")
+    parser.add_argument("--web-config", type=Path, default=Path("web_config.json"),
+                        help="GUI tab visibility configuration")
     args = parser.parse_args()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.timeout_seconds = args.timeout  # type: ignore[attr-defined]
     server.insecure = args.insecure  # type: ignore[attr-defined]
+    server.tabs = load_web_config(args.web_config)  # type: ignore[attr-defined]
     print(f"Open http://{args.host}:{args.port}/  (Ctrl+C to stop)")
     try:
         server.serve_forever()

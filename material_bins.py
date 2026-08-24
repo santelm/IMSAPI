@@ -87,6 +87,11 @@ class Config:
     login_url: str
     change_url: str
     attribute_url: str
+    attribute_get_url: str
+    attribute_remove_url: str
+    merge_get_url: str
+    merge_remove_url: str
+    upload_state_url: str
     logout_url: str
     station: str
     station_password: str
@@ -127,6 +132,48 @@ class ItacClient:
         if not isinstance(value, dict):
             raise ItacError(f"Expected a JSON object from {url}, got {type(value).__name__}")
         return value
+
+    def _call(self, url: str, name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not url:
+            raise ItacError(f"{name} endpoint is not configured")
+        if self.session_context is None:
+            self.login()
+        payload["sessionContext"] = self.session_context
+        response = self._post(url, payload)
+        if self._result_code(response) == -3:
+            self.login()
+            payload["sessionContext"] = self.session_context
+            response = self._post(url, payload)
+        return response
+
+    @staticmethod
+    def _find_value(response: dict[str, Any], names: tuple[str, ...]) -> Any:
+        wanted = {name.lower() for name in names}
+        queue: list[Any] = [response]
+        while queue:
+            item = queue.pop(0)
+            if isinstance(item, dict):
+                for key, value in item.items():
+                    if key.lower() in wanted:
+                        return value
+                    if isinstance(value, (dict, list)):
+                        queue.append(value)
+            elif isinstance(item, list):
+                queue.extend(value for value in item if isinstance(value, (dict, list)))
+        return None
+
+    @classmethod
+    def _records(cls, response: dict[str, Any], value_names: tuple[str, ...], keys: list[str]) -> list[dict[str, str]]:
+        values = cls._find_value(response, value_names)
+        if values is None:
+            return []
+        if isinstance(values, list) and all(isinstance(row, dict) for row in values):
+            return [{str(k): str(v) for k, v in row.items()} for row in values]
+        if isinstance(values, list) and all(not isinstance(row, (dict, list)) for row in values):
+            if len(values) % len(keys):
+                raise ItacError(f"Unexpected result array length {len(values)} for {len(keys)} keys")
+            return [dict(zip(keys, map(str, values[i:i + len(keys)]))) for i in range(0, len(values), len(keys))]
+        raise ItacError(f"Unsupported result format: {type(values).__name__}")
 
     @staticmethod
     def _result_code(response: dict[str, Any]) -> int:
@@ -246,6 +293,122 @@ class ItacClient:
             data_type, allow_overwrite,
         )
 
+    def get_serial_attributes(self, serial_number: str, attribute_codes: list[str] | None = None) -> list[dict[str, str]]:
+        keys = ["ATTRIBUTE_CODE", "ATTRIBUTE_VALUE", "DATA_TYPE", "ERROR_CODE"]
+        response = self._call(self.config.attribute_get_url, "ITAC_ATTRIBUTE_GET_URL", {
+            "stationNumber": self.config.station,
+            "objectType": 0,
+            "objectNumber": serial_number,
+            "objectDetail": "-1",
+            "attributeCodeArray": attribute_codes or [],
+            "allMergeLevel": 0,
+            "attributeResultKeys": keys,
+        })
+        code = self._result_code(response)
+        if code not in (0, 5):
+            raise ItacError(f"attribGetAttributeValues failed with IMSApi code {code}")
+        return self._records(response, ("attributeResultValues", "attributeResultValue"), keys)
+
+    def get_merge_parts(self, serial_number: str) -> list[dict[str, str]]:
+        keys = ["LEVEL", "PART_NUMBER", "SERIAL_NUMBER", "SERIAL_NUMBER_POS",
+                "SERIAL_PARENT_NUMBER", "SERIAL_PARENT_NUMBER_POS",
+                "SERIAL_SLAVE_NUMBER", "SERIAL_SLAVE_NUMBER_POS", "STATION_NUMBER"]
+        response = self._call(self.config.merge_get_url, "ITAC_MERGE_GET_URL", {
+            "stationNumber": self.config.station,
+            "serialNumber": serial_number,
+            "serialNumberPos": "-1",
+            "resolveDirection": 0,
+            "resolveLevel": 1,
+            "mergePartsResultKeys": keys,
+        })
+        code = self._result_code(response)
+        if code != 0:
+            raise ItacError(f"trGetMergeParts failed with IMSApi code {code}")
+        return self._records(response, ("mergePartsResultValues", "mergePartsResultValue"), keys)
+
+    def remove_merge_part(self, slave: str, slave_pos: str, text_info: str) -> int:
+        response = self._call(self.config.merge_remove_url, "ITAC_MERGE_REMOVE_URL", {
+            "stationNumber": self.config.station,
+            "processLayer": 2,
+            "serialNumberSlave": slave,
+            "serialNumberSlavePos": slave_pos or "-1",
+            "textInfo": text_info,
+        })
+        return self._result_code(response)
+
+    def remove_serial_attribute(self, serial_number: str, attribute_code: str) -> int:
+        response = self._call(self.config.attribute_remove_url, "ITAC_ATTRIBUTE_REMOVE_URL", {
+            "stationNumber": self.config.station,
+            "objectType": 0,
+            "objectNumber": serial_number,
+            "objectDetail": "-1",
+            "attributeCode": attribute_code,
+            "attributeValueKey": "0",
+        })
+        return self._result_code(response)
+
+    def scrap_serial(self, serial_number: str) -> int:
+        response = self._call(self.config.upload_state_url, "ITAC_UPLOAD_STATE_URL", {
+            "stationNumber": self.config.station,
+            "processLayer": 2,
+            "serialNumberRef": serial_number,
+            "serialNumberRefPos": "-1",
+            "serialNumberState": 2,
+            "duplicateSerialNumber": 0,
+            "bookDate": -1,
+            "cycleTime": -1,
+            "serialNumberUploadKeys": [],
+            "serialNumberUploadValues": [],
+        })
+        return self._result_code(response)
+
+    def disassemble_artemis(self, pcb_serial: str, store_attributes: bool = True) -> dict[str, Any]:
+        artemis = self.get_serial_attributes(pcb_serial, ["ARTEMIS_SN"])
+        if not artemis:
+            raise ItacError(f"ARTEMIS_SN attribute not found on {pcb_serial}")
+        final_serial = artemis[-1].get("ATTRIBUTE_VALUE", "").strip()
+        if not final_serial:
+            raise ItacError(f"ARTEMIS_SN attribute is empty on {pcb_serial}")
+        merge_parts = self.get_merge_parts(final_serial)
+        if len(merge_parts) not in (2, 3):
+            raise ItacError(f"Artemis merge tree must contain 2 or 3 entries; found {len(merge_parts)}")
+        attributes = self.get_serial_attributes(final_serial) if store_attributes else []
+        text_info = env("ITAC_DISASSEMBLY_TEXT_INFO", "IMSAPI web Artemis disassembly")
+        for part in merge_parts:
+            slave = part.get("SERIAL_SLAVE_NUMBER", "")
+            if not slave:
+                raise ItacError("Merge result is missing SERIAL_SLAVE_NUMBER")
+            code = self.remove_merge_part(slave, part.get("SERIAL_SLAVE_NUMBER_POS", "-1"), text_info)
+            if code not in (0, 1):
+                raise ItacError(f"trRemoveMergeParts failed for {slave} with IMSApi code {code}")
+            linked = self.get_serial_attributes(slave, ["ARTEMIS_SN"])
+            if linked:
+                code = self.remove_serial_attribute(slave, "ARTEMIS_SN")
+                if code not in (0, 1):
+                    raise ItacError(f"Could not remove ARTEMIS_SN from {slave}; IMSApi code {code}")
+        copied = 0
+        warnings: list[str] = []
+        for attribute in attributes:
+            attribute_code = attribute.get("ATTRIBUTE_CODE", "").strip()
+            attribute_value = attribute.get("ATTRIBUTE_VALUE", "")
+            if not attribute_code:
+                continue
+            code = self.append_attribute(pcb_serial, 0, attribute_code, attribute_value, "STRING", 1, "-1")
+            if code < 0:
+                raise ItacError(f"Could not copy attribute {attribute_code}; IMSApi code {code}")
+            if code > 0:
+                warnings.append(f"{attribute_code}: {code}")
+            copied += 1
+        code = self.remove_serial_attribute(final_serial, "-1")
+        if code not in (0, 1):
+            raise ItacError(f"Could not clear final-device attributes; IMSApi code {code}")
+        code = self.scrap_serial(final_serial)
+        if code != 0:
+            raise ItacError(f"Could not scrap final device; IMSApi code {code}")
+        return {"pcb_serial": pcb_serial, "final_serial": final_serial,
+                "merge_count": len(merge_parts), "attributes_copied": copied,
+                "warnings": warnings}
+
     def logout(self) -> None:
         if self.session_context is None or not self.config.logout_url:
             return
@@ -303,6 +466,11 @@ def build_config(args: argparse.Namespace) -> Config:
         login_url=required["ITAC_LOGIN_URL"],
         change_url=env("ITAC_CHANGE_URL"),
         attribute_url=env("ITAC_ATTRIBUTE_URL"),
+        attribute_get_url=env("ITAC_ATTRIBUTE_GET_URL"),
+        attribute_remove_url=env("ITAC_ATTRIBUTE_REMOVE_URL"),
+        merge_get_url=env("ITAC_MERGE_GET_URL"),
+        merge_remove_url=env("ITAC_MERGE_REMOVE_URL"),
+        upload_state_url=env("ITAC_UPLOAD_STATE_URL"),
         logout_url=env("ITAC_LOGOUT_URL"),
         station=required["ITAC_STATION"],
         station_password=env("ITAC_STATION_PASSWORD"),
