@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """Bulk-update iTAC material bins listed in a text file.
 
-The iTAC 9.10 IMSApi manual documents the function payloads, but places the
-REST URL/response envelope in a separate IMSApi-REST manual. Therefore the
-three endpoint URLs are configuration values rather than guessed here.
+The iTAC 9.10 IMSApi manual documents the function payloads. All actions are
+called below the single ITAC_BASE_URL configured for the target server.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import socket
 import ssl
 import sys
@@ -84,15 +82,7 @@ class ItacError(RuntimeError):
 
 @dataclass(frozen=True)
 class Config:
-    login_url: str
-    change_url: str
-    attribute_url: str
-    attribute_get_url: str
-    attribute_remove_url: str
-    merge_get_url: str
-    merge_remove_url: str
-    upload_state_url: str
-    logout_url: str
+    base_url: str
     station: str
     station_password: str
     user: str
@@ -102,6 +92,46 @@ class Config:
     system_identifier: str
     timeout: float
     verify_tls: bool
+    disassembly_text_info: str
+
+    def action_url(self, api_name: str) -> str:
+        return f"{self.base_url.rstrip('/')}/{api_name}"
+
+    @property
+    def login_url(self) -> str:
+        return self.action_url("REG_LOGIN")
+
+    @property
+    def logout_url(self) -> str:
+        return self.action_url("REG_LOGOUT")
+
+    @property
+    def change_url(self) -> str:
+        return self.action_url("ML_CHANGE_MATERIAL_BIN_DATA")
+
+    @property
+    def attribute_url(self) -> str:
+        return self.action_url("ATTRIB_APPEND_ATTRIBUTE_VALUES")
+
+    @property
+    def attribute_get_url(self) -> str:
+        return self.action_url("ATTRIB_GET_ATTRIBUTE_VALUES")
+
+    @property
+    def attribute_remove_url(self) -> str:
+        return self.action_url("ATTRIB_REMOVE_ATTRIBUTE_VALUE")
+
+    @property
+    def merge_get_url(self) -> str:
+        return self.action_url("TR_GET_MERGE_PARTS")
+
+    @property
+    def merge_remove_url(self) -> str:
+        return self.action_url("TR_REMOVE_MERGE_PARTS")
+
+    @property
+    def upload_state_url(self) -> str:
+        return self.action_url("TR_UPLOAD_STATE")
 
 
 class ItacClient:
@@ -224,8 +254,6 @@ class ItacClient:
         self.session_context = self._find_session(response)
 
     def change_material_bin(self, material_bin: str, key: str, value: str) -> int:
-        if not self.config.change_url:
-            raise ItacError("ITAC_CHANGE_URL is not configured")
         if self.session_context is None:
             self.login()
         payload = {
@@ -254,8 +282,6 @@ class ItacClient:
         object_detail: str = "",
     ) -> int:
         """Append an attribute to a serial number, work order, or container."""
-        if not self.config.attribute_url:
-            raise ItacError("ITAC_ATTRIBUTE_URL is not configured")
         if self.session_context is None:
             self.login()
         keys = ["ATTRIBUTE_CODE", "ATTRIBUTE_VALUE"]
@@ -295,7 +321,7 @@ class ItacClient:
 
     def get_serial_attributes(self, serial_number: str, attribute_codes: list[str] | None = None) -> list[dict[str, str]]:
         keys = ["ATTRIBUTE_CODE", "ATTRIBUTE_VALUE", "DATA_TYPE", "ERROR_CODE"]
-        response = self._call(self.config.attribute_get_url, "ITAC_ATTRIBUTE_GET_URL", {
+        response = self._call(self.config.attribute_get_url, "ATTRIB_GET_ATTRIBUTE_VALUES", {
             "stationNumber": self.config.station,
             "objectType": 0,
             "objectNumber": serial_number,
@@ -313,7 +339,7 @@ class ItacClient:
         keys = ["LEVEL", "PART_NUMBER", "SERIAL_NUMBER", "SERIAL_NUMBER_POS",
                 "SERIAL_PARENT_NUMBER", "SERIAL_PARENT_NUMBER_POS",
                 "SERIAL_SLAVE_NUMBER", "SERIAL_SLAVE_NUMBER_POS", "STATION_NUMBER"]
-        response = self._call(self.config.merge_get_url, "ITAC_MERGE_GET_URL", {
+        response = self._call(self.config.merge_get_url, "TR_GET_MERGE_PARTS", {
             "stationNumber": self.config.station,
             "serialNumber": serial_number,
             "serialNumberPos": "-1",
@@ -327,7 +353,7 @@ class ItacClient:
         return self._records(response, ("mergePartsResultValues", "mergePartsResultValue"), keys)
 
     def remove_merge_part(self, slave: str, slave_pos: str, text_info: str) -> int:
-        response = self._call(self.config.merge_remove_url, "ITAC_MERGE_REMOVE_URL", {
+        response = self._call(self.config.merge_remove_url, "TR_REMOVE_MERGE_PARTS", {
             "stationNumber": self.config.station,
             "processLayer": 2,
             "serialNumberSlave": slave,
@@ -337,7 +363,7 @@ class ItacClient:
         return self._result_code(response)
 
     def remove_serial_attribute(self, serial_number: str, attribute_code: str) -> int:
-        response = self._call(self.config.attribute_remove_url, "ITAC_ATTRIBUTE_REMOVE_URL", {
+        response = self._call(self.config.attribute_remove_url, "ATTRIB_REMOVE_ATTRIBUTE_VALUE", {
             "stationNumber": self.config.station,
             "objectType": 0,
             "objectNumber": serial_number,
@@ -348,7 +374,7 @@ class ItacClient:
         return self._result_code(response)
 
     def scrap_serial(self, serial_number: str) -> int:
-        response = self._call(self.config.upload_state_url, "ITAC_UPLOAD_STATE_URL", {
+        response = self._call(self.config.upload_state_url, "TR_UPLOAD_STATE", {
             "stationNumber": self.config.station,
             "processLayer": 2,
             "serialNumberRef": serial_number,
@@ -380,7 +406,7 @@ class ItacClient:
         final_serial = prepared["final_serial"]
         merge_parts = prepared["merge_parts"]
         attributes = self.get_serial_attributes(final_serial) if store_attributes else []
-        text_info = env("ITAC_DISASSEMBLY_TEXT_INFO", "IMSAPI web Artemis disassembly")
+        text_info = self.config.disassembly_text_info
         for part in merge_parts:
             slave = part.get("SERIAL_SLAVE_NUMBER", "")
             if not slave:
@@ -453,46 +479,56 @@ def read_bins(path: Path) -> list[str]:
     return bins
 
 
-def env(name: str, default: str = "") -> str:
-    return os.environ.get(name, default).strip()
+def load_app_config(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ItacError(f"Configuration file not found: {path}") from exc
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ItacError(f"Cannot load configuration {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ItacError("Configuration root must be a JSON object")
+    return value
 
 
-def build_config(args: argparse.Namespace) -> Config:
-    required = {
-        "ITAC_LOGIN_URL": env("ITAC_LOGIN_URL"),
-        "ITAC_STATION": env("ITAC_STATION"),
-        "ITAC_CLIENT": env("ITAC_CLIENT"),
-    }
+def build_config(app_config: dict[str, Any]) -> Config:
+    itac = app_config.get("itac")
+    if not isinstance(itac, dict):
+        raise ItacError("Configuration must contain an 'itac' object")
+    required = {name: str(itac.get(name, "")).strip() for name in ("base_url", "station", "client")}
     missing = [name for name, value in required.items() if not value]
     if missing:
-        raise ItacError("Missing configuration: " + ", ".join(missing))
-    registration_type = env("ITAC_REGISTRATION_TYPE", "U").upper()
+        raise ItacError("Missing iTAC configuration: " + ", ".join(missing))
+    registration_type = str(itac.get("registration_type", "U")).strip().upper()
     if registration_type not in {"S", "T", "U"}:
-        raise ItacError("ITAC_REGISTRATION_TYPE must be S, T, or U")
+        raise ItacError("itac.registration_type must be S, T, or U")
+    try:
+        timeout = float(itac.get("timeout_seconds", 30))
+    except (TypeError, ValueError) as exc:
+        raise ItacError("itac.timeout_seconds must be numeric") from exc
+    if timeout <= 0:
+        raise ItacError("itac.timeout_seconds must be greater than zero")
+    verify_tls = itac.get("verify_tls", True)
+    if not isinstance(verify_tls, bool):
+        raise ItacError("itac.verify_tls must be true or false")
     return Config(
-        login_url=required["ITAC_LOGIN_URL"],
-        change_url=env("ITAC_CHANGE_URL"),
-        attribute_url=env("ITAC_ATTRIBUTE_URL"),
-        attribute_get_url=env("ITAC_ATTRIBUTE_GET_URL"),
-        attribute_remove_url=env("ITAC_ATTRIBUTE_REMOVE_URL"),
-        merge_get_url=env("ITAC_MERGE_GET_URL"),
-        merge_remove_url=env("ITAC_MERGE_REMOVE_URL"),
-        upload_state_url=env("ITAC_UPLOAD_STATE_URL"),
-        logout_url=env("ITAC_LOGOUT_URL"),
-        station=required["ITAC_STATION"],
-        station_password=env("ITAC_STATION_PASSWORD"),
-        user=env("ITAC_USER"),
-        password=env("ITAC_PASSWORD"),
-        client=required["ITAC_CLIENT"],
+        base_url=required["base_url"],
+        station=required["station"],
+        station_password=str(itac.get("station_password", "")),
+        user=str(itac.get("user", "")),
+        password=str(itac.get("password", "")),
+        client=required["client"],
         registration_type=registration_type,
-        system_identifier=env("ITAC_SYSTEM_IDENTIFIER", socket.gethostname()),
-        timeout=args.timeout,
-        verify_tls=not args.insecure,
+        system_identifier=str(itac.get("system_identifier") or socket.gethostname()),
+        timeout=timeout,
+        verify_tls=verify_tls,
+        disassembly_text_info=str(itac.get("disassembly_text_info", "IMSAPI web Artemis disassembly")).strip(),
     )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=Path("config.json"))
     parser.add_argument("input", type=Path, help="UTF-8 text file, one object number per line")
     parser.add_argument("--operation", choices=("change", "append-attribute"), default="change")
     parser.add_argument("--key", help="iTAC material-bin field to change")
@@ -502,8 +538,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--value", required=True, help="New value applied to every listed bin")
     parser.add_argument("--apply", action="store_true", help="Perform updates (default: dry-run)")
     parser.add_argument("--continue-on-error", action="store_true")
-    parser.add_argument("--timeout", type=float, default=30.0)
-    parser.add_argument("--insecure", action="store_true", help="Disable TLS verification")
     return parser.parse_args()
 
 
@@ -526,7 +560,7 @@ def main() -> int:
         print("No changes made. Add --apply after reviewing the list.")
         return 0
 
-    client = ItacClient(build_config(args))
+    client = ItacClient(build_config(load_app_config(args.config)))
     failures = 0
     try:
         client.login()

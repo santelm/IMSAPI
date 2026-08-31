@@ -10,13 +10,12 @@ import threading
 from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
 
 from material_bins import (
     ATTRIBUTE_OBJECT_TYPES, SUPPORTED_KEYS, ItacClient, ItacError,
-    build_config, parse_bins, validate_material_bin_value,
+    build_config, load_app_config, parse_bins, validate_material_bin_value,
 )
 
 
@@ -25,17 +24,14 @@ UPDATE_LOCK = threading.Lock()
 DEFAULT_WEB_CONFIG = {"default_tab": "disassembly", "tabs": {"bulk_update": True, "disassembly": True}}
 
 
-def load_web_config(path: Path) -> tuple[dict[str, bool], str]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        data = DEFAULT_WEB_CONFIG
-    except (json.JSONDecodeError, OSError) as exc:
-        raise ItacError(f"Cannot load web configuration {path}: {exc}") from exc
+def load_web_config(app_config: dict[str, Any]) -> tuple[dict[str, bool], str]:
+    data = app_config.get("web", DEFAULT_WEB_CONFIG)
+    if not isinstance(data, dict):
+        raise ItacError("Configuration 'web' value must be an object")
     tabs = data.get("tabs", {})
     result = {name: bool(tabs.get(name, default)) for name, default in DEFAULT_WEB_CONFIG["tabs"].items()}
     if not any(result.values()):
-        raise ItacError("At least one GUI tab must be enabled in web_config.json")
+        raise ItacError("At least one GUI tab must be enabled in config.json")
     default_tab = str(data.get("default_tab", "disassembly"))
     if default_tab not in result:
         raise ItacError(f"Unknown default_tab {default_tab!r} in web configuration")
@@ -264,8 +260,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_page(active_tab="disassembly")
                     return
                 with UPDATE_LOCK:
-                    args = SimpleNamespace(timeout=self.server.timeout_seconds, insecure=self.server.insecure)  # type: ignore[attr-defined]
-                    client = ItacClient(build_config(args))
+                    client = ItacClient(self.server.itac_config)  # type: ignore[attr-defined]
                     try:
                         client.login()
                         if action == "prepare":
@@ -331,8 +326,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ItacError("Tick the confirmation box before applying updates")
             rows: list[tuple[str, str, int | None]] = []
             with UPDATE_LOCK:
-                args = SimpleNamespace(timeout=self.server.timeout_seconds, insecure=self.server.insecure)  # type: ignore[attr-defined]
-                client = ItacClient(build_config(args))
+                client = ItacClient(self.server.itac_config)  # type: ignore[attr-defined]
                 try:
                     client.login()
                     for material_bin in bins:
@@ -366,18 +360,21 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: local computer only)")
-    parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--timeout", type=float, default=30.0, help="iTAC request timeout")
-    parser.add_argument("--insecure", action="store_true", help="Disable iTAC TLS verification")
-    parser.add_argument("--web-config", type=Path, default=Path("web_config.json"),
-                        help="GUI tab visibility configuration")
+    parser.add_argument("--config", type=Path, default=Path("config.json"))
     args = parser.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    server.timeout_seconds = args.timeout  # type: ignore[attr-defined]
-    server.insecure = args.insecure  # type: ignore[attr-defined]
-    server.tabs, server.default_tab = load_web_config(args.web_config)  # type: ignore[attr-defined]
-    print(f"Open http://{args.host}:{args.port}/  (Ctrl+C to stop)")
+    app_config = load_app_config(args.config)
+    web = app_config.get("web", {})
+    if not isinstance(web, dict):
+        raise ItacError("Configuration 'web' value must be an object")
+    host = str(web.get("host", "127.0.0.1"))
+    try:
+        port = int(web.get("port", 8080))
+    except (TypeError, ValueError) as exc:
+        raise ItacError("web.port must be an integer") from exc
+    server = ThreadingHTTPServer((host, port), Handler)
+    server.itac_config = build_config(app_config)  # type: ignore[attr-defined]
+    server.tabs, server.default_tab = load_web_config(app_config)  # type: ignore[attr-defined]
+    print(f"Open http://{host}:{port}/  (Ctrl+C to stop)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -1,0 +1,24 @@
+{
+  "itac": {
+    "base_url": "http://itac-server/imsapi/mes/actions",
+    "station": "STATION-01",
+    "station_password": "",
+    "user": "api-user",
+    "password": "replace-me",
+    "client": "YOUR_ITAC_CLIENT_CODE",
+    "registration_type": "U",
+    "system_identifier": "imsapi-tools",
+    "timeout_seconds": 30,
+    "verify_tls": true,
+    "disassembly_text_info": "IMSAPI web Artemis disassembly"
+  },
+  "web": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "default_tab": "disassembly",
+    "tabs": {
+      "bulk_update": true,
+      "disassembly": true
+    }
+  }
+}

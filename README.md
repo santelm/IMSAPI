@@ -4,10 +4,9 @@
 IMSApi function `mlChangeMaterialBinData` for each one. It uses only Python's
 standard library.
 
-The supplied iTAC 9.10 manual documents the function payloads, but says the
-REST URL and JSON response envelope are defined in the separate
-`IMSApi-REST` documentation. Set the three URLs to the endpoints from your
-iTAC installation before using `--apply`. If your REST adapter wraps return
+The supplied iTAC 9.10 manual documents the function payloads, while the REST
+response envelope is defined in the separate `IMSApi-REST` documentation. Set
+one `itac.base_url` in `config.json` before using `--apply`. If your REST adapter wraps return
 codes under an envelope not recognized by the script, adjust `_result_code`
 and `_find_session` using one sanitized response sample.
 
@@ -19,7 +18,9 @@ comments beginning with `#`, and duplicate values are ignored. See
 
 ## Configuration
 
-Use `itac.env.example.ps1` as a template. Login types from the manual are:
+Copy `config.example.json` to the ignored local file `config.json`, then enter
+the iTAC connection, credentials, timeout, TLS, web server, and tab settings.
+No environment variables are read. Login types from the manual are:
 
 - `U`: user/password login
 - `S`: station login, optionally with user/password
@@ -67,8 +68,7 @@ Add `--apply` to execute it. Attribute values are always sent as `STRING`, with
 overwrite enabled and a history entry created (`allowOverWrite=1`).
 
 Add `--continue-on-error` to process the remaining bins after a failed update.
-By default, TLS certificates are verified; `--insecure` is available only for a
-controlled test system.
+TLS verification and request timeout are controlled by `config.json`.
 
 The manual permits these update keys: `APS_TRANSFER`, `BOOK_DATE`,
 `CLASSIFICATION`, `EXPIRATION_DATE`, `EXPIRATION_DATE_FINAL`, `HU_NUMBER`,
@@ -82,7 +82,7 @@ quantity by the same difference; it is not a direct assignment of current stock.
 
 ## Web interface
 
-The browser UI uses the same client and environment configuration and requires
+The browser UI uses the same `config.json` configuration and requires
 no additional packages. Start it with:
 
 ```powershell
@@ -100,18 +100,18 @@ Material-bin values are checked before connecting: APS transfer accepts `0` or
 quantity must be a finite number using `.` as decimal separator; and state accepts
 only `B`, `E`, `F`, `Q`, `R`, `S`, or `V`.
 
-For attribute operations, configure `ITAC_ATTRIBUTE_URL` with your installation's
-`attribAppendAttributeValues` REST endpoint. The operation uses material-bin/container
+Attribute operations use the generated `ATTRIB_APPEND_ATTRIBUTE_VALUES` action URL.
+The operation uses material-bin/container
 attributes (`objectType=2`), work-order attributes (`objectType=1`), or serial-number
 attributes (`objectType=0`). All use `bookDate=-1` (current server time).
 
-The server listens only on the local computer by default. Use `--host` only if
-you deliberately want to expose it to another interface; authentication and
+The server listens only on the local computer by default. Change `web.host` only
+if you deliberately want to expose it to another interface; authentication and
 HTTPS should be added before any shared or production deployment.
 
 ### Configurable tabs
 
-Tab visibility is controlled by `web_config.json`:
+Tab visibility is controlled by the `web` section of `config.json`:
 
 ```json
 {
@@ -123,8 +123,8 @@ Tab visibility is controlled by `web_config.json`:
 }
 ```
 
-Set either value to `false` to hide and disable that feature. A different file
-can be selected with `python .\web_interface.py --web-config PATH`.
+Set either value to `false` to hide and disable that feature. A different complete
+configuration file can be selected with `python .\web_interface.py --config PATH`.
 `default_tab` selects the tab shown when the GUI is first opened. If that tab is
 disabled, the first enabled tab is used automatically.
 
@@ -148,13 +148,11 @@ The checkbox is enabled by default. If it is cleared, steps 3 and 5 are skipped.
 All reads complete before the first destructive call, and processing stops at
 the first failed IMSApi step.
 
-Configure the following REST endpoints in addition to the existing login,
-logout, and append-attribute endpoints:
+Only one server URL is configured as `itac.base_url`, for example
+`http://itac-server/imsapi/mes/actions`.
 
-- `ITAC_ATTRIBUTE_GET_URL` (`attribGetAttributeValues`)
-- `ITAC_ATTRIBUTE_REMOVE_URL` (`attribRemoveAttributeValue`)
-- `ITAC_MERGE_GET_URL` (`trGetMergeParts`)
-- `ITAC_MERGE_REMOVE_URL` (`trRemoveMergeParts`)
-- `ITAC_UPLOAD_STATE_URL` (`trUploadState`)
+The client appends the API action name automatically, for example
+`/REG_LOGIN`, `/ATTRIB_GET_ATTRIBUTE_VALUES`, `/TR_REMOVE_MERGE_PARTS`, or
+`/TR_UPLOAD_STATE`.
 
 `ITAC_DISASSEMBLY_TEXT_INFO` supplies the mandatory unmerge audit text.

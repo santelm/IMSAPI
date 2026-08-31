@@ -1,7 +1,0 @@
-{
-  "default_tab": "disassembly",
-  "tabs": {
-    "bulk_update": true,
-    "disassembly": true
-  }
-}
